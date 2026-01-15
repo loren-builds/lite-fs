@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>LiteFS Beta 0.4</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+        }
+
+        /* Remove margins and scrollbars */
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+
+<body>
+    
+    <div id="overlayText"
+        style="position: fixed; top: 110px; left: 20px; color: white; background: rgba(0,0,0,0.7); padding: 10px; font-size: 20px; display: none; z-index: 1000;">
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        
+        // --- TERRAIN CONSTANTS ---
+        const world_size = 10000; // Will represent the 100x100 area (10,000 sq units)
+        const terrain_resolution = 640; // Number of subdivisions (e.g., 64x64 grid)
+        const max_hill_height = 10; // Max height for the rolling hills
+        const noise_scale = 0.05; // Controls the frequency/size of the hills (smaller = larger hills)
+
+        // --- WORLD & GAME CONSTANTS ---
+        let move_speed = 0;
+        const keys = {};
+        let rotate_speed = 0;
+        let gravity = 1;
+        let rr_spd = 0;
+        let rl_spd = 0;
+        let pu_spd = 0;
+        let pd_spd = 0;
+        let rudl_spd = 0;
+        let rudr_spd = 0;
+        let roll_inertia = 0.001;
+
+
+        const scene = new THREE.Scene();
+        const FOG_COLOR = 0xAAAAAA; // A light gray or a lighter version of your sky color
+        const FOG_NEAR = 10;        // Fog starts 10 units from the camera (hazy in the foreground)
+        const FOG_FAR = 1000;       // Fog becomes completely opaque (covers everything) at 2000 units out
+
+        scene.fog = new THREE.Fog(FOG_COLOR, FOG_NEAR, FOG_FAR);
+
+        scene.background = new THREE.Color(0x87CEEB); // Sky Blue
+        const camera = new THREE.PerspectiveCamera(80, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialiasing: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        // --- NOISE FUNCTION (Simple Pseudo-Perlin Noise) ---
+        // A basic, fast noise function to generate height data.
+        // For production, you'd use a dedicated noise library (e.g., noisejs or FastNoise).
+        function noise(x, y, scale, seed = 12345) {
+            const getPseudoRandom = (val) => {
+                let s = Math.sin(val * seed) * 10000;
+                return s - Math.floor(s);
+            }
+
+            const pX = x * scale;
+            const pY = y * scale;
+
+            // Simple combined noise for rolling effect
+            return (getPseudoRandom(pX + pY) * 2 - 1) * (Math.sin(pX * 5) + Math.cos(pY * 5)) * 0.5;
+        }
+
+        // --- TERRAIN GENERATION FUNCTION ---
+        function generateRollingTerrain() {
+            // 1. Create a Plane Geometry with many subdivisions
+            // The size is TERRAIN_SIZE x TERRAIN_SIZE (100x100)
+            // The subdivisions (resolution) are TERRAIN_RESOLUTION x TERRAIN_RESOLUTION (64x64)
+            const geometry = new THREE.PlaneGeometry(
+                world_size,
+                world_size,
+                terrain_resolution - 1,
+                terrain_resolution - 1
+            );
+
+            // 2. Iterate through all vertices and adjust the Z (height) value
+            // PlaneGeometry is created on the XY plane by default. We will rotate it later.
+            const positionAttribute = geometry.attributes.position;
+
+            for (let i = 0; i < positionAttribute.count; i++) {
+                // Get the base X and Y coordinates of the vertex (before rotation)
+                const x = positionAttribute.getX(i);
+                const y = positionAttribute.getY(i);
+
+                // Calculate height using the noise function
+                // The noise function returns a value between roughly -1 and 1
+                const height = noise(x, y, noise_scale) * max_hill_height;
+
+                // Set the Z coordinate (which will be Y-height after rotation)
+                positionAttribute.setZ(i, height);
+            }
+
+            // 3. Mark the position attribute as needing update
+            geometry.attributes.position.needsUpdate = true;
+
+            // 4. Recalculate normals for proper lighting (important for complex geometry)
+            geometry.computeVertexNormals();
+
+            return geometry;
+        }
+
+        const groundGeometry = generateRollingTerrain();
+        // Use a standard material so the normals (and hills) are visible when we add lights later.
+        // Using MeshBasicMaterial won't show the hills well without lights because it ignores normals.
+        const groundMaterial = new THREE.MeshLambertMaterial({ color: 0x002200, side: THREE.DoubleSide });
+        const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+
+        // PlaneGeometry is created on XY plane. Rotate it to stand on XZ plane.
+        ground.rotation.x = -Math.PI / 2;
+        ground.position.y = 0;
+        scene.add(ground);
+
+        // --- LIGHTING (Required for LambertMaterial to show shading/hills) ---
+        const ambientLight = new THREE.AmbientLight(0x404040, 8); // soft white light
+        scene.add(ambientLight);
+
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 3);
+        directionalLight.position.set(5000, 2000, 3000);
+        scene.add(directionalLight);
+
+        const plane = new THREE.Group();
+        scene.add(plane);
+        plane.position.y = 10;
+        plane.add(camera);
+
+        const planeMaterial = new THREE.MeshLambertMaterial({ color: 0x330000 });
+
+        const wingGeometry = new THREE.BoxGeometry(1.2, 0.05, 0.3);
+        const wing = new THREE.Mesh(wingGeometry, planeMaterial);
+        plane.add(wing);
+
+        const fGeometry = new THREE.CylinderGeometry(0.12, 0.02, 0.8, 16);
+        const fuselage = new THREE.Mesh(fGeometry, planeMaterial);
+        fuselage.position.z = 0.2;
+        fuselage.rotation.x = - Math.PI / 1.95;
+        plane.add(fuselage);
+
+        let engineLength = .1;
+        engineRadius = .12
+        const engineGeometry = new THREE.CylinderGeometry(engineRadius, engineRadius, engineLength, 16);
+        const engineMaterial = new THREE.MeshLambertMaterial({ color: 0x161616 });
+        const engine = new THREE.Mesh(engineGeometry, engineMaterial);
+        engine.rotation.x = - Math.PI / 2;
+        engine.position.z = -((engineLength / 2) + .195);
+        engine.position.y = -0.015;
+        plane.add(engine);
+
+        const propGeometry = new THREE.BoxGeometry(.5, .05, .01);
+        const propMaterial = new THREE.MeshLambertMaterial({ color: 0x080808 });
+        const prop = new THREE.Mesh(propGeometry, propMaterial);
+        prop.position.y = -0.015;
+        prop.position.z = (engine.position.z - (engineLength / 2) - .02);
+        plane.add(prop);
+
+        const cockpitGeometry = new THREE.SphereGeometry(0.07, 32, 32);
+        const cockpitMaterial = new THREE.MeshPhongMaterial({ color: 0xDDDDDD, transparent: true, opacity: 0.4 });
+        const cockpit = new THREE.Mesh(cockpitGeometry, cockpitMaterial);
+        cockpit.position.y = .07;
+        cockpit.position.z = -.03;
+        cockpit.scale.z = 1.5;
+        plane.add(cockpit);
+
+        stabilizerGeometry = new THREE.BoxGeometry(.5, .03, .12);
+        stabilizer = new THREE.Mesh(stabilizerGeometry, planeMaterial);
+        stabilizer.position.z = .54;
+        plane.add(stabilizer);
+
+        rudderGeometry = new THREE.BoxGeometry(.03, .25, .12)
+        rudder = new THREE.Mesh(rudderGeometry, planeMaterial);
+        rudder.position.z = .54;
+        rudder.position.y = .125;
+        plane.add(rudder);
+
+        ground.rotation.x = Math.PI / 2;
+
+        camera.position.set(0, 0.25, 1);
+        camera.lookAt(0, 0.3, -100);
+
+
+
+        function generateClouds() {
+            for (let i = 0; i < world_size / 2; i++) {
+
+                // Geometry: Simple 1x1x1 box
+                const cloudGeometry = new THREE.BoxGeometry(Math.random() * 80, 5, Math.random() * 200);
+
+                const cloudMaterial = new THREE.MeshBasicMaterial({
+                    color: 0xffffff,
+                    transparent: true,
+                    opacity: 0.5
+                });
+
+                const cloud = new THREE.Mesh(cloudGeometry, cloudMaterial);
+
+                // Calculate random X and Z coordinates
+                // Math.random() gives a number between 0 and 1.
+                // We multiply by PLANE_SIZE (100) to get 0 to 100.
+                // We subtract (PLANE_SIZE / 2) (50) to shift the range from 0..100 to -50..50
+                const randomX = (Math.random() * world_size) - (world_size / 2);
+                const randomZ = (Math.random() * world_size) - (world_size / 2);
+
+                // Set the position of the cube:
+                // X: Randomly across the width
+                // Y: 0.5 ensures the bottom of the 1-unit high cube sits perfectly on the plane (which is at Y=0)
+                // Z: Randomly across the depth
+                cloud.position.set(randomX, 500 + Math.random(), randomZ);
+
+                // Add the cube to the scene
+                scene.add(cloud);
+            }
+        }
+
+
+        document.addEventListener('keydown', (event) => {
+            keys[event.key.toLowerCase()] = true;
+        });
+
+        document.addEventListener('keyup', (event) => {
+            keys[event.key.toLowerCase()] = false;
+        });
+
+        function showOverlayText(message) {
+            const overlay = document.getElementById('overlayText');
+            overlay.textContent = message;
+            overlay.style.display = 'block';
+        }
+
+        let crashed = false;
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (!keys['d'] && rr_spd > 0) { rr_spd -= roll_inertia }
+            if (!keys['a'] && rl_spd > 0) { rl_spd -= roll_inertia }
+            if (!keys['w'] && pd_spd > 0) { pd_spd -= roll_inertia / 2 }
+            if (!keys['s'] && pu_spd > 0) { pu_spd -= roll_inertia / 2 }
+            if (!keys['arrowleft'] && rudl_spd > 0) { rudl_spd -= roll_inertia }
+            if (!keys['arrowright'] && rudr_spd > 0) { rudr_spd -= roll_inertia }
+
+            let rotate_speed = 0.0125;
+            let prop_speed = move_speed;
+
+            prop.rotateZ(prop_speed);
+
+            if (plane.position.y < 10) {
+                plane.position.y = 10;
+                if (plane.rotation.x < 0) {
+                    crashed = true
+                }
+            }
+
+            if (crashed) {
+                plane.position.y = 10;
+                rl_spd = 0;
+                rr_spd = 0;
+                pu_spd = 0;
+                pd_spd = 0;
+                rudl_spd = 0;
+                rudr_spd = 0;
+            }
+
+            if (crashed) {
+                showOverlayText("You added to earth's perfect kill/death ratio! Press R to reset.");
+                camera.position.set(0, 1, 2);
+                planeMaterial.color.setHex(0x000000);
+                crashed = true;
+
+                move_speed = 0;
+            }
+
+            if (keys['a'] && !crashed) {
+                if (rl_spd < rotate_speed * 3) { rl_spd += roll_inertia }
+            }
+            if (keys['d'] && !crashed) {
+                if (rr_spd < rotate_speed * 3) { rr_spd += roll_inertia }
+
+            }
+            if (keys['w'] && !crashed) {
+                if (pd_spd < rotate_speed) { pd_spd += roll_inertia / 2 }
+            }
+
+            if (keys['s'] && !crashed) {
+                if (pu_spd < rotate_speed) { pu_spd += roll_inertia / 2 }
+            }
+
+            if (keys['arrowup'] && move_speed < 2) {
+                if (!crashed) {
+                    move_speed += 0.003;
+                }
+            }
+
+            if (keys['arrowdown'] && move_speed > 0) {
+                move_speed -= 0.003;
+            }
+
+            if (keys['arrowleft'] && !crashed) {
+                if (rudl_spd < rotate_speed) { rudl_spd += roll_inertia }
+            }
+
+            if (keys['arrowright'] && !crashed) {
+                if (rudr_spd < rotate_speed) { rudr_spd += roll_inertia }
+            }
+
+            if (keys['r']) {
+                location.reload();
+            }
+
+            plane.rotation.reorder('YXZ')
+            plane.rotateZ(-rr_spd);
+            plane.rotateZ(rl_spd);
+            plane.rotateX(-pd_spd);
+            plane.rotateX(pu_spd);
+            plane.rotateY(rudl_spd);
+            plane.rotateY(-rudr_spd);
+            if (plane.rotation.x > -(3.14159 / 2) && plane.rotation.x < (3.14159 / 2) && !crashed && plane.position.y > 10) {
+                plane.rotation.x -= 0.005;
+            }
+            if (plane.rotation.x < -(3.14159 / 2) || plane.rotation.x > (3.14159 / 2) && !crashed && plane.position.y > 10) {
+                plane.rotation.x += 0.005;
+            }
+            plane.rotateX(0.0025 * move_speed)
+            plane.translateZ(-move_speed);
+            if (plane.position.y > 10) {
+                plane.translateY(-0.5);
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        // Handle window resizing (still important!)
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        animate(); // Start the loop!
+
+        generateClouds();
+        renderer.render(scene, camera);
+    </script>
+
+</body>
+
+</html>
